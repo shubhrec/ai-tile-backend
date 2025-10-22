@@ -5,12 +5,18 @@ import os
 import mimetypes
 import httpx
 import time
+import logging
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
+from app.services.prompt_builder import build_prompt
+
+# Configure logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 router = APIRouter()
@@ -21,7 +27,14 @@ class GenerateRequest(BaseModel):
     """Request payload for /generate endpoint."""
     tile_url: str = Field(..., description="URL of the tile image")
     home_url: str = Field(..., description="URL of the home/room image")
-    prompt: str = Field(..., description="Text prompt for image generation", min_length=1)
+    prompt: str = Field(
+        default="",
+        description="User hint or context (e.g., 'modern bathroom', 'kitchen backsplash')"
+    )
+    surface: str = Field(
+        default="auto",
+        description="Target surface: 'auto', 'floor', 'wall', 'backsplash', 'shower'"
+    )
 
 
 # Ensure generated folder exists
@@ -98,25 +111,43 @@ async def generate_image(request: GenerateRequest):
                     detail=f"Failed to download images: {str(e)}"
                 )
 
-        # Step 3: Initialize Gemini client
+        # Step 3: Build intelligent prompt using prompt builder
+        user_hint = request.prompt if request.prompt else ""
+        surface = request.surface if hasattr(request, 'surface') else "auto"
+
+        # Generate comprehensive prompt
+        ai_prompt = build_prompt(user_hint=user_hint, surface=surface)
+
+        # Log the generated prompt for debugging
+        logger.info(f"🎨 Generated AI Prompt:\n{ai_prompt}")
+        logger.info(f"📝 User hint: '{user_hint}'")
+        logger.info(f"🎯 Surface: {surface}")
+
+        # Step 4: Initialize Gemini client
         gemini_client = genai.Client(api_key=api_key)
         model = "gemini-2.5-flash-image"
 
-        # Step 4: Build request content with text prompt + both images
+        # Step 5: Build request content with explicit differentiation
         # The Parts list includes:
-        # - Text prompt
-        # - Tile image as inline data
-        # - Home image as inline data
+        # - AI-generated comprehensive prompt
+        # - Clear labeling of TILE image
+        # - Tile image data
+        # - Clear labeling of HOUSE image
+        # - House image data
         contents = [
             types.Content(
                 role="user",
                 parts=[
-                    types.Part.from_text(text=request.prompt),
+                    types.Part.from_text(text=ai_prompt),
+                    types.Part.from_text(text="The following image is the TILE design that should be applied:"),
                     types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=tile_bytes)),
+                    types.Part.from_text(text="The following image is the HOUSE/ROOM where the tile should be installed:"),
                     types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=home_bytes)),
                 ],
             ),
         ]
+
+        logger.info("📤 Sending request to Gemini API with differentiated images")
 
         # Configure to return image output
         config = types.GenerateContentConfig(
@@ -160,7 +191,7 @@ async def generate_image(request: GenerateRequest):
                 with open(local_path, "wb") as f:
                     f.write(data_buffer)
 
-                print(f"✅ Generated image saved locally: {local_path}")
+                logger.info(f"✅ Generated image saved locally: {local_path}")
 
                 # Step 6: Upload to Supabase Storage
                 try:
@@ -170,9 +201,9 @@ async def generate_image(request: GenerateRequest):
                             f,
                             file_options={"content-type": "image/jpeg"}
                         )
-                    print(f"✅ Uploaded to Supabase Storage: {file_name}")
+                    logger.info(f"✅ Uploaded to Supabase Storage: {file_name}")
                 except Exception as upload_error:
-                    print(f"⚠️  Supabase upload error: {upload_error}")
+                    logger.error(f"⚠️  Supabase upload error: {upload_error}")
                     raise HTTPException(
                         status_code=500,
                         detail=f"Failed to upload to Supabase Storage: {str(upload_error)}"
@@ -180,25 +211,26 @@ async def generate_image(request: GenerateRequest):
 
                 # Get public URL
                 public_url = supabase.storage.from_(bucket_name).get_public_url(file_name)
-                print(f"✅ Public URL: {public_url}")
+                logger.info(f"✅ Public URL: {public_url}")
 
                 # Step 7: Insert record into database
                 try:
-                    prompt = request.prompt
+                    # Save user hint (not full AI prompt) for database record
+                    user_prompt = request.prompt if request.prompt else "Auto-generated"
                     tile_id = None  # Will be None unless passed in request
                     user_id = None  # Will be None unless passed in request
 
                     db_record = {
                         "user_id": user_id,
                         "tile_id": tile_id,
-                        "prompt": prompt,
+                        "prompt": user_prompt,
                         "image_url": public_url,
                     }
 
                     result = supabase.table("generated_images").insert(db_record).execute()
-                    print(f"✅ Database record inserted: {result.data}")
+                    logger.info(f"✅ Database record inserted: {result.data}")
                 except Exception as db_error:
-                    print(f"⚠️  Database insert error: {db_error}")
+                    logger.error(f"⚠️  Database insert error: {db_error}")
                     raise HTTPException(
                         status_code=500,
                         detail=f"Failed to insert database record: {str(db_error)}"
@@ -223,8 +255,8 @@ async def generate_image(request: GenerateRequest):
     except Exception as e:
         # Catch-all for unexpected errors
         import traceback
-        print(f"❌ Error in /generate: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"❌ Error in /generate: {str(e)}")
+        logger.error(traceback.format_exc())
 
         raise HTTPException(
             status_code=500,
