@@ -7,12 +7,14 @@ import httpx
 import time
 import logging
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, Field
+from typing import Optional
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
 from app.services.prompt_builder import build_prompt
+from app.services.auth import verify_token
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -27,6 +29,8 @@ class GenerateRequest(BaseModel):
     """Request payload for /generate endpoint."""
     tile_url: str = Field(..., description="URL of the tile image")
     home_url: str = Field(..., description="URL of the home/room image")
+    tile_id: Optional[int] = Field(None, description="ID of the tile from database (optional)")
+    home_id: Optional[int] = Field(None, description="ID of the home from database (optional)")
     prompt: str = Field(
         default="",
         description="User hint or context (e.g., 'modern bathroom', 'kitchen backsplash')"
@@ -42,10 +46,12 @@ GENERATED_DIR = Path("generated")
 GENERATED_DIR.mkdir(exist_ok=True)
 
 
-@router.post("/generate")
-async def generate_image(request: GenerateRequest):
+@router.post("/generate", dependencies=[Depends(verify_token)])
+async def generate_image(request: Request, body: GenerateRequest):
     """
     Generate a visualization using Gemini 2.5 Flash Image API.
+
+    **Authentication Required:** Bearer token in Authorization header
 
     This endpoint:
     1. Downloads both tile and home images from provided URLs
@@ -58,6 +64,10 @@ async def generate_image(request: GenerateRequest):
     8. Returns the public URL
     """
     try:
+        # Step 0: Extract authenticated user ID
+        user_id = request.state.user_id
+        logger.info(f"🔐 Authenticated user: {user_id[:8]}...")
+
         # Step 1: Validate API key
         api_key = os.environ.get("NANO_BANANA_API_KEY")
         if not api_key:
@@ -83,7 +93,7 @@ async def generate_image(request: GenerateRequest):
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 # Download tile image
-                tile_response = await client.get(request.tile_url)
+                tile_response = await client.get(body.tile_url)
                 if tile_response.status_code != 200:
                     raise HTTPException(
                         status_code=400,
@@ -92,7 +102,7 @@ async def generate_image(request: GenerateRequest):
                 tile_bytes = tile_response.content
 
                 # Download home image
-                home_response = await client.get(request.home_url)
+                home_response = await client.get(body.home_url)
                 if home_response.status_code != 200:
                     raise HTTPException(
                         status_code=400,
@@ -112,8 +122,8 @@ async def generate_image(request: GenerateRequest):
                 )
 
         # Step 3: Build intelligent prompt using prompt builder
-        user_hint = request.prompt if request.prompt else ""
-        surface = request.surface if hasattr(request, 'surface') else "auto"
+        user_hint = body.prompt if body.prompt else ""
+        surface = body.surface if hasattr(body, 'surface') else "auto"
 
         # Generate comprehensive prompt
         ai_prompt = build_prompt(user_hint=user_hint, surface=surface)
@@ -213,22 +223,21 @@ async def generate_image(request: GenerateRequest):
                 public_url = supabase.storage.from_(bucket_name).get_public_url(file_name)
                 logger.info(f"✅ Public URL: {public_url}")
 
-                # Step 7: Insert record into database
+                # Step 7: Insert record into database with authenticated user_id
                 try:
                     # Save user hint (not full AI prompt) for database record
-                    user_prompt = request.prompt if request.prompt else "Auto-generated"
-                    tile_id = None  # Will be None unless passed in request
-                    user_id = None  # Will be None unless passed in request
+                    user_prompt = body.prompt if body.prompt else "Auto-generated"
 
                     db_record = {
-                        "user_id": user_id,
-                        "tile_id": tile_id,
+                        "user_id": user_id,  # Authenticated user from JWT
+                        "tile_id": body.tile_id,  # Tile ID from request (optional)
+                        "home_id": body.home_id,  # Home ID from request (optional)
                         "prompt": user_prompt,
                         "image_url": public_url,
                     }
 
                     result = supabase.table("generated_images").insert(db_record).execute()
-                    logger.info(f"✅ Database record inserted: {result.data}")
+                    logger.info(f"✅ Database record inserted for user {user_id[:8]}... (tile_id={body.tile_id}, home_id={body.home_id}): {result.data}")
                 except Exception as db_error:
                     logger.error(f"⚠️  Database insert error: {db_error}")
                     raise HTTPException(

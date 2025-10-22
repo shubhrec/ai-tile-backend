@@ -11,7 +11,7 @@ import os
 # Load environment variables from .env file
 load_dotenv()
 
-from app.api import routes_health, routes_generate, routes_gallery, routes_uploads
+from app.api import routes_health, routes_generate, routes_gallery, routes_uploads, routes_tiles, routes_homes
 
 app = FastAPI(
     title="AI Tile Visualization API",
@@ -40,6 +40,8 @@ app.include_router(routes_health.router, tags=["health"])
 app.include_router(routes_generate.router, tags=["generation"])
 app.include_router(routes_gallery.router, tags=["gallery"])
 app.include_router(routes_uploads.router, prefix="/api", tags=["uploads"])
+app.include_router(routes_tiles.router, tags=["tiles"])
+app.include_router(routes_homes.router, tags=["homes"])
 
 
 @app.on_event("startup")

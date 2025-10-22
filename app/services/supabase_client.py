@@ -112,6 +112,7 @@ class SupabaseService:
 
 # Singleton instance
 _supabase_service: Optional[SupabaseService] = None
+_supabase_client: Optional[Client] = None
 
 
 def get_supabase_service() -> SupabaseService:
@@ -120,3 +121,21 @@ def get_supabase_service() -> SupabaseService:
     if _supabase_service is None:
         _supabase_service = SupabaseService()
     return _supabase_service
+
+
+def get_supabase_client() -> Client:
+    """Get or create Supabase client instance for direct database access."""
+    global _supabase_client
+    if _supabase_client is None:
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+        if not url or not key:
+            raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
+
+        _supabase_client = create_client(url, key)
+    return _supabase_client
+
+
+# Export client for direct use in routes
+supabase = get_supabase_client()

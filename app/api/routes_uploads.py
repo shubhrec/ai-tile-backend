@@ -3,10 +3,13 @@ File upload and retrieval endpoints for Supabase Storage.
 """
 import os
 import time
-from fastapi import APIRouter, UploadFile, File, HTTPException, Path
+import logging
+from fastapi import APIRouter, UploadFile, File, HTTPException, Path, Request, Depends
 from supabase import create_client, Client
 from typing import List
+from app.services.auth import verify_token
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -25,15 +28,19 @@ def get_supabase_client() -> Client:
     return create_client(supabase_url, supabase_key)
 
 
-@router.post("/upload/{bucket}")
+@router.post("/upload/{bucket}", dependencies=[Depends(verify_token)])
 async def upload_file(
+    request: Request,
     bucket: str = Path(..., description="Bucket name (e.g., 'tiles', 'homes', 'generated')"),
     file: UploadFile = File(..., description="Image file to upload")
 ):
     """
     Upload an image file to Supabase Storage.
 
+    **Authentication Required:** Bearer token in Authorization header
+
     Args:
+        request: FastAPI request (contains authenticated user_id)
         bucket: The storage bucket name
         file: Image file (multipart/form-data)
 
@@ -41,6 +48,10 @@ async def upload_file(
         JSON with success status and public URL
     """
     try:
+        # Extract authenticated user ID
+        user_id = request.state.user_id
+        logger.info(f"🔐 User {user_id[:8]}... uploading to bucket '{bucket}'")
+
         # Validate file is an image
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(
@@ -64,9 +75,9 @@ async def upload_file(
                 file_bytes,
                 file_options={"content-type": file.content_type}
             )
-            print(f"✅ File uploaded: {file_name} to bucket '{bucket}'")
+            logger.info(f"✅ File uploaded by {user_id[:8]}...: {file_name} to bucket '{bucket}'")
         except Exception as upload_error:
-            print(f"❌ Upload error: {upload_error}")
+            logger.error(f"❌ Upload error: {upload_error}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Upload failed: {str(upload_error)}"
@@ -83,7 +94,7 @@ async def upload_file(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Unexpected error in upload: {str(e)}")
+        logger.error(f"❌ Unexpected error in upload: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -127,7 +138,7 @@ async def list_files(
                     public_url = supabase.storage.from_(bucket).get_public_url(file_name)
                     urls.append(public_url)
 
-            print(f"✅ Listed {len(urls)} files from bucket '{bucket}'")
+            logger.info(f"✅ Listed {len(urls)} files from bucket '{bucket}'")
 
             return {
                 "success": True,
@@ -135,7 +146,7 @@ async def list_files(
             }
 
         except Exception as list_error:
-            print(f"❌ List error: {list_error}")
+            logger.error(f"❌ List error: {list_error}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Failed to list files: {str(list_error)}"
@@ -144,7 +155,7 @@ async def list_files(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Unexpected error in list: {str(e)}")
+        logger.error(f"❌ Unexpected error in list: {str(e)}")
         return {
             "success": False,
             "error": str(e),
