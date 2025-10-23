@@ -20,6 +20,8 @@ class AddTileRequest(BaseModel):
     """Request payload for adding a new tile."""
     image_url: str = Field(..., description="Supabase Storage URL of the tile image")
     name: Optional[str] = Field(default="", description="Optional name/description for the tile")
+    size: Optional[str] = Field(default=None, max_length=50, description="Optional tile size (e.g., '600x600 mm')")
+    price: Optional[float] = Field(default=None, ge=0, description="Optional tile price (must be positive)")
 
 
 @router.post("/api/tiles", dependencies=[Depends(verify_token)])
@@ -31,14 +33,15 @@ async def add_tile(request: Request, body: AddTileRequest):
 
     Args:
         request: FastAPI request (contains authenticated user_id)
-        body: Tile data (image_url, optional name)
+        body: Tile data (image_url, optional name, size, price)
 
     Returns:
         JSON with success status and created tile record
 
     Raises:
-        HTTPException 400: If image_url is missing
+        HTTPException 400: If image_url is missing or validation fails
         HTTPException 401: If authentication fails
+        HTTPException 422: If size exceeds 50 chars or price is negative
         HTTPException 500: If database operation fails
     """
     try:
@@ -46,11 +49,19 @@ async def add_tile(request: Request, body: AddTileRequest):
         logger.info(f"🔐 User {user_id[:8]}... adding tile: {body.name or 'Unnamed'}")
 
         # Insert tile record
-        res = supabase.table("tiles").insert({
+        tile_data = {
             "user_id": user_id,
             "name": body.name or "",
             "image_url": body.image_url,
-        }).execute()
+        }
+
+        # Add optional fields if provided
+        if body.size is not None:
+            tile_data["size"] = body.size
+        if body.price is not None:
+            tile_data["price"] = body.price
+
+        res = supabase.table("tiles").insert(tile_data).execute()
 
         if not res.data:
             raise HTTPException(
