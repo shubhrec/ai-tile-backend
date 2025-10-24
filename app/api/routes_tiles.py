@@ -22,6 +22,15 @@ class AddTileRequest(BaseModel):
     name: Optional[str] = Field(default="", description="Optional name/description for the tile")
     size: Optional[str] = Field(default=None, max_length=50, description="Optional tile size (e.g., '600x600 mm')")
     price: Optional[float] = Field(default=None, ge=0, description="Optional tile price (must be positive)")
+    add_catalog: Optional[bool] = Field(default=True, description="Whether to add to catalog (True) or keep as temporary (False)")
+
+
+class UpdateTileRequest(BaseModel):
+    """Request payload for updating an existing tile."""
+    name: Optional[str] = Field(default=None, description="Optional name/description for the tile")
+    size: Optional[str] = Field(default=None, max_length=50, description="Optional tile size (e.g., '600x600 mm')")
+    price: Optional[float] = Field(default=None, ge=0, description="Optional tile price (must be positive)")
+    add_catalog: Optional[bool] = Field(default=None, description="Whether to add to catalog (True) or keep as temporary (False)")
 
 
 @router.post("/api/tiles", dependencies=[Depends(verify_token)])
@@ -53,6 +62,7 @@ async def add_tile(request: Request, body: AddTileRequest):
             "user_id": user_id,
             "name": body.name or "",
             "image_url": body.image_url,
+            "add_catalog": body.add_catalog if body.add_catalog is not None else True,
         }
 
         # Add optional fields if provided
@@ -181,6 +191,95 @@ async def get_tile_by_id(request: Request, tile_id: int):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch tile: {str(e)}"
+        )
+
+
+@router.patch("/api/tiles/{tile_id}", dependencies=[Depends(verify_token)])
+async def update_tile(request: Request, tile_id: int, body: UpdateTileRequest):
+    """
+    Update a tile's details (name, size, price) by its ID.
+
+    **Authentication Required:** Bearer token in Authorization header
+
+    Args:
+        request: FastAPI request (contains authenticated user_id)
+        tile_id: ID of the tile to update
+        body: Fields to update (only provided fields will be updated)
+
+    Returns:
+        JSON with success status and updated tile record
+
+    Raises:
+        HTTPException 400: If validation fails
+        HTTPException 401: If authentication fails
+        HTTPException 404: If tile not found or not owned by user
+        HTTPException 422: If size exceeds 50 chars or price is negative
+        HTTPException 500: If database operation fails
+    """
+    try:
+        user_id = request.state.user_id
+        logger.info(f"🔐 User {user_id[:8]}... updating tile ID={tile_id}")
+
+        # Step 1: Verify tile exists and belongs to user
+        existing = supabase.table("tiles")\
+            .select("*")\
+            .eq("id", tile_id)\
+            .eq("user_id", user_id)\
+            .execute()
+
+        if not existing.data:
+            logger.warning(f"⚠️  Tile ID={tile_id} not found or not owned by user {user_id[:8]}...")
+            raise HTTPException(
+                status_code=404,
+                detail="Tile not found or not owned by user"
+            )
+
+        # Step 2: Build update payload with only provided fields
+        update_data = {}
+        if body.name is not None:
+            update_data["name"] = body.name
+        if body.size is not None:
+            update_data["size"] = body.size
+        if body.price is not None:
+            update_data["price"] = body.price
+        if body.add_catalog is not None:
+            update_data["add_catalog"] = body.add_catalog
+
+        # If no fields provided, return error
+        if not update_data:
+            raise HTTPException(
+                status_code=400,
+                detail="No fields provided to update"
+            )
+
+        # Step 3: Update tile record
+        res = supabase.table("tiles")\
+            .update(update_data)\
+            .eq("id", tile_id)\
+            .eq("user_id", user_id)\
+            .execute()
+
+        if not res.data:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to update tile record"
+            )
+
+        tile = res.data[0]
+        logger.info(f"✅ Tile ID={tile_id} updated for user {user_id[:8]}...")
+
+        return {
+            "success": True,
+            "tile": tile
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error updating tile: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update tile: {str(e)}"
         )
 
 
