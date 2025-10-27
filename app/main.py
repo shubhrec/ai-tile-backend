@@ -1,8 +1,10 @@
 """
 FastAPI main application entrypoint for AI Tile Visualization Tool.
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import Response
 import os
 from dotenv import load_dotenv
 from fastapi.staticfiles import StaticFiles
@@ -11,7 +13,7 @@ import os
 # Load environment variables from .env file
 load_dotenv()
 
-from app.api import routes_health, routes_generate, routes_gallery, routes_uploads, routes_tiles, routes_homes, routes_chats
+from app.api import routes_health, routes_generate, routes_gallery, routes_uploads, routes_tiles, routes_homes, routes_chats, routes_user
 
 app = FastAPI(
     title="AI Tile Visualization API",
@@ -35,6 +37,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Enable Gzip compression for responses > 1KB (reduces response size by 60-80%)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+# Cache-Control middleware for read-only GET endpoints
+@app.middleware("http")
+async def add_cache_headers(request: Request, call_next):
+    """Add Cache-Control headers to GET requests for performance."""
+    response = await call_next(request)
+
+    # Add cache headers only for successful GET requests on read-only endpoints
+    if request.method == "GET" and response.status_code == 200:
+        # Cache tiles, homes, and chat lists for 60 seconds
+        if any(path in request.url.path for path in ["/api/tiles", "/api/homes", "/api/chats"]):
+            # Don't cache detail endpoints (with IDs)
+            if not any(char.isdigit() for char in request.url.path.split("/")[-1]):
+                response.headers["Cache-Control"] = "public, max-age=60"
+
+    return response
+
 # Register routes
 app.include_router(routes_health.router, tags=["health"])
 app.include_router(routes_generate.router, tags=["generation"])
@@ -43,6 +65,7 @@ app.include_router(routes_uploads.router, prefix="/api", tags=["uploads"])
 app.include_router(routes_tiles.router, tags=["tiles"])
 app.include_router(routes_homes.router, tags=["homes"])
 app.include_router(routes_chats.router, tags=["chats"])
+app.include_router(routes_user.router, tags=["user"])
 
 
 @app.on_event("startup")

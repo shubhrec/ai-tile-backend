@@ -118,11 +118,12 @@ async def get_tiles(request: Request):
         user_id = request.state.user_id
         logger.info(f"🔐 User {user_id[:8]}... fetching tiles")
 
-        # Query tiles for this user
+        # Query tiles for this user (limit fields and results for performance)
         res = supabase.table("tiles")\
-            .select("*")\
+            .select("id, name, image_url, size, price, add_catalog, created_at")\
             .eq("user_id", user_id)\
             .order("created_at", desc=True)\
+            .limit(100)\
             .execute()
 
         tiles = res.data if res.data else []
@@ -390,12 +391,13 @@ async def get_generated_images(request: Request, tile_id: int):
         logger.info(f"🔐 User {user_id[:8]}... fetching generated images for tile ID={tile_id}")
 
         # Query generated images for this tile and user
-        # Include home info via join
+        # Include home info via join (limit fields and results for performance)
         res = supabase.table("generated_images")\
-            .select("*, homes(id, name, image_url)")\
+            .select("id, image_url, prompt, kept, created_at, homes(id, name, image_url)")\
             .eq("tile_id", tile_id)\
             .eq("user_id", user_id)\
             .order("created_at", desc=True)\
+            .limit(100)\
             .execute()
 
         generated = res.data if res.data else []

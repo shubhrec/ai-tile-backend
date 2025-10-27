@@ -6,15 +6,16 @@ import mimetypes
 import httpx
 import time
 import logging
+import aiofiles
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, Field
 from typing import Optional
 from google import genai
 from google.genai import types
-from supabase import create_client, Client
 from app.services.prompt_builder import build_prompt
 from app.services.auth import verify_token
+from app.services.supabase_client import supabase
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -97,19 +98,7 @@ async def generate_image(request: Request, body: GenerateRequest):
                 detail="Missing home source: provide either home_url or home_id"
             )
 
-        # Step 0.6: Initialize Supabase client for URL fetching
-        supabase_url = os.environ.get("SUPABASE_URL")
-        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-
-        if not supabase_url or not supabase_key:
-            raise HTTPException(
-                status_code=500,
-                detail="Supabase credentials not configured on server"
-            )
-
-        supabase: Client = create_client(supabase_url, supabase_key)
-
-        # Step 0.7: Fetch URLs from database if IDs provided but URLs missing
+        # Step 0.6: Fetch URLs from database if IDs provided but URLs missing
         tile_url = body.tile_url
         home_url = body.home_url
 
@@ -266,18 +255,19 @@ async def generate_image(request: Request, body: GenerateRequest):
                 file_name = f"generated_output_{int(time.time())}.jpg"
                 local_path = GENERATED_DIR / file_name
 
-                # Save image to local disk first
-                with open(local_path, "wb") as f:
-                    f.write(data_buffer)
+                # Save image to local disk first (async for better performance)
+                async with aiofiles.open(local_path, "wb") as f:
+                    await f.write(data_buffer)
 
                 logger.info(f"✅ Generated image saved locally: {local_path}")
 
                 # Step 6: Upload to Supabase Storage
                 try:
-                    with open(local_path, "rb") as f:
+                    async with aiofiles.open(local_path, "rb") as f:
+                        file_data = await f.read()
                         supabase.storage.from_(bucket_name).upload(
                             file_name,
-                            f,
+                            file_data,
                             file_options={"content-type": "image/jpeg"}
                         )
                     logger.info(f"✅ Uploaded to Supabase Storage: {file_name}")
@@ -379,18 +369,6 @@ async def update_generated_image(request: Request, image_id: int, body: UpdateGe
         user_id = request.state.user_id
         logger.info(f"🔐 User {user_id[:8]}... updating generated image ID={image_id}")
 
-        # Initialize Supabase client
-        supabase_url = os.environ.get("SUPABASE_URL")
-        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-
-        if not supabase_url or not supabase_key:
-            raise HTTPException(
-                status_code=500,
-                detail="Supabase credentials not configured on server"
-            )
-
-        supabase: Client = create_client(supabase_url, supabase_key)
-
         # Step 1: Verify image exists and belongs to user
         existing = supabase.table("generated_images")\
             .select("*")\
@@ -473,18 +451,7 @@ async def delete_generated_image(request: Request, image_id: int):
         user_id = request.state.user_id
         logger.info(f"🔐 User {user_id[:8]}... attempting to delete generated image ID={image_id}")
 
-        # Initialize Supabase client
-        supabase_url = os.environ.get("SUPABASE_URL")
-        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         bucket_name = os.environ.get("SUPABASE_STORAGE_BUCKET_GENERATED", "generated")
-
-        if not supabase_url or not supabase_key:
-            raise HTTPException(
-                status_code=500,
-                detail="Supabase credentials not configured on server"
-            )
-
-        supabase: Client = create_client(supabase_url, supabase_key)
 
         # Step 1: Verify image exists and belongs to user
         existing = supabase.table("generated_images")\

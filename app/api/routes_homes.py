@@ -139,11 +139,12 @@ async def get_homes(request: Request):
         user_id = request.state.user_id
         logger.info(f"🔐 User {user_id[:8]}... fetching homes")
 
-        # Query homes for this user
+        # Query homes for this user (limit fields and results for performance)
         res = supabase.table("homes")\
-            .select("*")\
+            .select("id, name, image_url, created_at")\
             .eq("user_id", user_id)\
             .order("created_at", desc=True)\
+            .limit(100)\
             .execute()
 
         homes = res.data if res.data else []

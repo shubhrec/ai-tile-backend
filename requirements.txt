@@ -9,3 +9,4 @@ google-genai
 python-multipart
 pyjwt[crypto]
 requests
+aiofiles

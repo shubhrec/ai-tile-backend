@@ -5,27 +5,13 @@ import os
 import time
 import logging
 from fastapi import APIRouter, UploadFile, File, HTTPException, Path, Request, Depends
-from supabase import create_client, Client
 from typing import List
 from app.services.auth import verify_token
+from app.services.supabase_client import supabase
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def get_supabase_client() -> Client:
-    """Initialize and return Supabase client."""
-    supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-
-    if not supabase_url or not supabase_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Supabase credentials not configured on server"
-        )
-
-    return create_client(supabase_url, supabase_key)
 
 
 @router.post("/upload/{bucket}", dependencies=[Depends(verify_token)])
@@ -58,9 +44,6 @@ async def upload_file(
                 status_code=400,
                 detail="Only image files are allowed"
             )
-
-        # Initialize Supabase client
-        supabase = get_supabase_client()
 
         # Read file bytes
         file_bytes = await file.read()
@@ -115,9 +98,6 @@ async def list_files(
         JSON with success status and list of public URLs
     """
     try:
-        # Initialize Supabase client
-        supabase = get_supabase_client()
-
         # List all files in the bucket
         try:
             result = supabase.storage.from_(bucket).list()

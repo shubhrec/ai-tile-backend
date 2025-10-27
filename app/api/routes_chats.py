@@ -91,11 +91,12 @@ async def get_chats(request: Request):
         user_id = request.state.user_id
         logger.info(f"🔐 User {user_id[:8]}... fetching chats")
 
-        # Query chats for this user
+        # Query chats for this user (limit results for performance)
         res = supabase.table("chats")\
             .select("id, name, created_at")\
             .eq("user_id", user_id)\
             .order("created_at", desc=True)\
+            .limit(100)\
             .execute()
 
         chats = res.data if res.data else []
@@ -153,12 +154,13 @@ async def get_chat_with_images(request: Request, chat_id: int):
 
         chat = chat_res.data[0]
 
-        # Step 2: Fetch associated generated images with tile names
+        # Step 2: Fetch associated generated images with tile names (limit results for performance)
         images_res = supabase.table("generated_images")\
-            .select("id, chat_id, image_url, prompt, kept, tile_id, home_id, user_id, created_at, tiles(name)")\
+            .select("id, chat_id, image_url, prompt, kept, tile_id, home_id, created_at, tiles(name)")\
             .eq("chat_id", chat_id)\
             .eq("user_id", user_id)\
             .order("created_at", desc=True)\
+            .limit(100)\
             .execute()
 
         images = images_res.data if images_res.data else []
