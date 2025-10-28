@@ -98,14 +98,15 @@ async def generate_image(request: Request, body: GenerateRequest):
                 detail="Missing home source: provide either home_url or home_id"
             )
 
-        # Step 0.6: Fetch URLs from database if IDs provided but URLs missing
+        # Step 0.6: Fetch URLs and metadata from database if IDs provided but URLs missing
         tile_url = body.tile_url
         home_url = body.home_url
+        tile_metadata = {}
 
         if not tile_url and body.tile_id:
-            logger.info(f"📥 Fetching tile URL from database for tile_id={body.tile_id}")
+            logger.info(f"📥 Fetching tile data from database for tile_id={body.tile_id}")
             tile_res = supabase.table("tiles")\
-                .select("image_url")\
+                .select("image_url, size, type")\
                 .eq("id", body.tile_id)\
                 .eq("user_id", user_id)\
                 .execute()
@@ -116,8 +117,12 @@ async def generate_image(request: Request, body: GenerateRequest):
                     detail=f"Tile with ID {body.tile_id} not found or not owned by user"
                 )
 
-            tile_url = tile_res.data[0]["image_url"]
+            tile_data = tile_res.data[0]
+            tile_url = tile_data["image_url"]
+            tile_metadata["size"] = tile_data.get("size")
+            tile_metadata["type"] = tile_data.get("type")
             logger.info(f"✅ Fetched tile URL: {tile_url}")
+            logger.info(f"✅ Fetched tile metadata: size={tile_metadata.get('size')}, type={tile_metadata.get('type')}")
 
         if not home_url and body.home_id:
             logger.info(f"📥 Fetching home URL from database for home_id={body.home_id}")
@@ -179,17 +184,24 @@ async def generate_image(request: Request, body: GenerateRequest):
                     detail=f"Failed to download images: {str(e)}"
                 )
 
-        # Step 3: Build intelligent prompt using prompt builder
+        # Step 3: Build intelligent prompt using prompt builder with tile metadata
         user_hint = body.prompt if body.prompt else ""
         surface = body.surface if hasattr(body, 'surface') else "auto"
 
-        # Generate comprehensive prompt
-        ai_prompt = build_prompt(user_hint=user_hint, surface=surface)
+        # Generate comprehensive prompt with tile metadata
+        ai_prompt = build_prompt(
+            user_hint=user_hint,
+            surface=surface,
+            tile_size=tile_metadata.get("size"),
+            tile_type=tile_metadata.get("type")
+        )
 
         # Log the generated prompt for debugging
         logger.info(f"🎨 Generated AI Prompt:\n{ai_prompt}")
         logger.info(f"📝 User hint: '{user_hint}'")
         logger.info(f"🎯 Surface: {surface}")
+        logger.info(f"📏 Tile size: {tile_metadata.get('size', 'default')}")
+        logger.info(f"🎨 Tile type: {tile_metadata.get('type', 'default')}")
 
         # Step 4: Initialize Gemini client
         gemini_client = genai.Client(api_key=api_key)

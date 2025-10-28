@@ -9,98 +9,76 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def build_prompt(user_hint: str = "", surface: str = "auto") -> str:
+def build_prompt(
+    user_hint: str = "",
+    surface: str = "auto",
+    tile_size: str = None,
+    tile_type: str = None
+) -> str:
     """
     Builds a robust AI prompt that guides the model to realistically apply a tile design onto a house image.
 
     Args:
         user_hint: Optional user context or note (e.g., "modern bathroom", "kitchen backsplash")
         surface: Target surface - "auto", "floor", "wall", "backsplash", "shower"
+        tile_size: Tile size in mm (e.g., "600x600")
+        tile_type: Tile type/material (e.g., "ceramic tile", "marble", "porcelain")
 
     Returns:
         Comprehensive prompt string for the AI model
-
-    Handles edge cases such as:
-    - Determining whether tiles belong on floor or wall
-    - Ensuring edges align cleanly
-    - Avoiding distortion of objects (furniture, people, etc.)
-    - Maintaining realistic lighting and perspective
-    - Differentiating tile vs house input clearly
-    - Default assumption: floor unless 'bathroom', 'wall', 'kitchen backsplash' detected
     """
-
-    # Base instruction set for the AI model
-    base_prompt = (
-        "You are an expert architectural visualizer and interior designer. "
-        "Your task is to combine the provided TILE image onto the HOUSE/ROOM image realistically. "
-        "\n\n"
-        "CRITICAL REQUIREMENTS:\n"
-        "1. PERSPECTIVE & ALIGNMENT: Ensure perfect perspective alignment with the room's geometry. "
-        "Tiles must follow the floor or wall plane naturally, with correct vanishing points.\n"
-        "2. LIGHTING & SHADOWS: Preserve and enhance existing shadows, lighting, and reflections. "
-        "Match the room's ambient lighting on the tile surface.\n"
-        "3. EDGE HANDLING: Tiles must align cleanly at edges, corners, and transitions. "
-        "Grout lines should be consistent and realistic.\n"
-        "4. OBJECT PRESERVATION: Do NOT distort or tile over furniture, people, fixtures, doors, windows, or natural elements. "
-        "These must remain untouched and realistic.\n"
-        "5. TEXTURE & SCALE: Maintain the tile texture's scale appropriately for the room size. "
-        "Avoid stretching or compressing the tile pattern unnaturally.\n"
-        "6. SURFACE SELECTION: "
-    )
-
     # Automatic surface detection logic
+    hint_lower = user_hint.lower() if user_hint else ""
+
     if surface == "auto":
-        # Analyze user hint for surface clues
-        hint_lower = user_hint.lower() if user_hint else ""
-
         if any(word in hint_lower for word in ["bathroom", "shower", "bath", "wall", "backsplash"]):
-            detected_surface = "wall"
-            base_prompt += (
-                "Based on the context, apply the tile design to the WALLS. "
-                "For bathroom or shower scenes, cover walls naturally while avoiding fixtures. "
-                "For kitchen backsplash, apply tiles between counters and cabinets.\n"
-            )
+            surface_type = "wall"
+            region_hint = "vertical surfaces"
         else:
-            detected_surface = "floor"
-            base_prompt += (
-                "Apply the tile design to the FLOOR surface. "
-                "Ensure tiles follow the floor plane with correct perspective. "
-                "Avoid tiling over rugs, furniture legs, or floor-level objects.\n"
-            )
-
-        logger.info(f"Auto-detected surface: {detected_surface} (from hint: '{user_hint}')")
+            surface_type = "floor"
+            region_hint = "bottom part of the image"
+        logger.info(f"Auto-detected surface: {surface_type} (from hint: '{user_hint}')")
     else:
-        # User explicitly specified surface
-        base_prompt += f"Apply the tile design specifically to the {surface.upper()}.\n"
+        surface_type = surface
+        region_hint = "bottom part of the image" if surface == "floor" else "vertical surfaces"
         logger.info(f"User-specified surface: {surface}")
 
-    # Additional constraints
-    base_prompt += (
-        "\n"
-        "7. REALISM: Focus on showing how the tile will look AFTER professional installation. "
-        "The result should be photorealistic and indistinguishable from a real renovation.\n"
-        "8. BOUNDARIES: Do NOT tile over:\n"
-        "   - Ceilings (unless explicitly a ceiling tile scenario)\n"
-        "   - Doors or door frames\n"
-        "   - Windows or window frames\n"
-        "   - Furniture or appliances\n"
-        "   - Decorative elements\n"
-        "   - People or pets\n"
-        "\n"
-        "9. OUTPUT QUALITY: Generate a high-quality, professional visualization suitable for "
-        "client presentations or renovation planning.\n"
-    )
+    # Set defaults for tile metadata
+    tile_type = tile_type or "ceramic tile"
+    tile_size = tile_size or "600x600"
+
+    logger.info(f"Tile metadata - Size: {tile_size}, Type: {tile_type}")
+
+    # Build structured prompt
+    base_prompt = f"""You are creating a photorealistic render to visualize how a house would look
+with a specific tile applied.
+
+- Use the provided home photo as the base image.
+- Apply the tile image only on the appropriate surface ({surface_type}), such as the {region_hint}.
+- Preserve the rest of the scene exactly as in the original photo:
+  lighting, walls, shadows, and objects remain unchanged.
+
+Tile details:
+- Tile size: {tile_size} mm
+- Tile type: {tile_type} (e.g., matte, glossy, marble, wood, stone)
+- Maintain correct aspect ratio and pattern alignment according to tile size.
+- Do not resize, distort, or duplicate the tile pattern unnaturally.
+- Ensure tiles are evenly spaced with realistic grout lines.
+- Keep tile colour and texture identical to the original tile image.
+- If the tile is large (≥800mm), show fewer but larger tiles;
+  if small (≤300mm), repeat more frequently for a natural layout.
+- The floor/wall edges must align properly—no stretched or warped tiles.
+
+Output requirements:
+- Produce a realistic composite as if professionally rendered.
+- Keep the tile pattern crisp and consistent.
+- Avoid generating additional tiles or reflections not present in the original.
+"""
 
     # Append user hint if provided
     if user_hint and user_hint.strip():
-        base_prompt += f"\n\nADDITIONAL USER CONTEXT: {user_hint.strip()}\n"
+        base_prompt += f"\nUser request: {user_hint.strip()}\n"
         logger.info(f"User hint included: '{user_hint.strip()}'")
-
-    # Final instruction
-    base_prompt += (
-        "\n"
-        "Generate the composite image showing the tile applied to the room with perfect realism and attention to detail."
-    )
 
     return base_prompt
 
@@ -138,7 +116,9 @@ def build_advanced_prompt(
     user_hint: str = "",
     surface: str = "auto",
     room_type: str = "auto",
-    style_preference: str = ""
+    style_preference: str = "",
+    tile_size: str = None,
+    tile_type: str = None
 ) -> str:
     """
     Advanced prompt builder with additional customization options.
@@ -148,11 +128,13 @@ def build_advanced_prompt(
         surface: Target surface (auto, floor, wall, backsplash, shower)
         room_type: Type of room (auto, bathroom, kitchen, living room, etc.)
         style_preference: Style guidance (modern, traditional, minimalist, etc.)
+        tile_size: Tile size in mm (e.g., "600x600")
+        tile_type: Tile type/material (e.g., "ceramic tile", "marble", "porcelain")
 
     Returns:
         Detailed prompt string
     """
-    prompt = build_prompt(user_hint, surface)
+    prompt = build_prompt(user_hint, surface, tile_size, tile_type)
 
     if style_preference:
         prompt += f"\n\nSTYLE GUIDANCE: Emphasize a {style_preference} aesthetic in the final visualization."
