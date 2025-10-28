@@ -180,104 +180,188 @@ async def generate_image(request: Request, body: GenerateRequest):
                     detail=f"Failed to download images: {str(e)}"
                 )
 
-        # Step 3: Initialize Gemini client
+        # Step 3: Initialize Gemini client and helper functions
         gemini_client = genai.Client(api_key=api_key)
         model = "gemini-2.5-flash-image"
 
-        # Step 4: PASS 1 - Context Understanding
-        # First Gemini call to analyze both images and extract context
+        # Helper function for retry logic with exponential backoff
+        def call_gemini_with_retry(contents, config, max_retries=3, timeout=120):
+            """Call Gemini with automatic retry logic and timeout handling."""
+            import asyncio
+            from asyncio import TimeoutError as AsyncTimeoutError
+
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"🔄 Attempt {attempt + 1}/{max_retries}...")
+
+                    # Call Gemini with timeout
+                    response = gemini_client.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=config,
+                    )
+
+                    if not response:
+                        raise ValueError("Empty response from Gemini")
+
+                    logger.info(f"✅ Gemini call successful on attempt {attempt + 1}")
+                    return response
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Attempt {attempt + 1} failed: {str(e)}")
+
+                    if attempt == max_retries - 1:
+                        # Last attempt failed
+                        raise
+
+                    # Wait before retry with exponential backoff
+                    wait_time = (2 ** attempt) * 2  # 2s, 4s, 8s
+                    logger.info(f"⏳ Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+
+            raise Exception("Max retries exceeded")
+
+        # Step 4: PASS 1 - Context Understanding with robust error handling
         logger.info("🔍 Pass 1: Analyzing images for context understanding...")
 
-        context_prompt = """Analyze the two provided images.
-- Identify whether the tile is meant for floors or walls based on texture and pattern.
-- Estimate the tile's aspect ratio and visual size.
-- Determine which parts of the house image are most suitable for applying the tile.
-- Summarize in one short JSON object:
-  {
-    "surface_type": "...",
-    "estimated_tile_size": "...",
-    "region_description": "...",
-    "lighting_condition": "..."
-  }
-"""
+        context = {
+            "surface_type": "floor",
+            "estimated_tile_size": "medium",
+            "region_description": "bottom part of the image",
+            "lighting_condition": "natural"
+        }
 
-        context_contents = [
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part.from_text(text=context_prompt),
-                    types.Part.from_text(text="TILE IMAGE:"),
-                    types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=tile_bytes)),
-                    types.Part.from_text(text="HOUSE/ROOM IMAGE:"),
-                    types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=home_bytes)),
-                ],
-            ),
-        ]
-
-        # Configure for TEXT response
-        context_config = types.GenerateContentConfig(
-            response_modalities=["TEXT"]
-        )
-
-        # Call Gemini for context analysis
         try:
-            context_response = gemini_client.models.generate_content(
-                model=model,
-                contents=context_contents,
-                config=context_config,
+            context_prompt = """Analyze the two provided images and extract context.
+
+TILE IMAGE Analysis:
+- Determine if tile is for floors, walls, or backsplash
+- Estimate size (small <300mm, medium 300-600mm, large >600mm)
+- Identify material type (ceramic, marble, wood, stone, etc.)
+- Note if glossy or matte finish
+
+HOUSE IMAGE Analysis:
+- Identify the room type and existing lighting
+- Determine which surface(s) should receive the tile
+- Note the lighting condition (bright/natural/dim/artificial)
+
+Output ONLY a JSON object:
+{
+  "surface_type": "floor|wall|backsplash",
+  "estimated_tile_size": "small|medium|large",
+  "region_description": "descriptive location",
+  "lighting_condition": "lighting type"
+}"""
+
+            context_contents = [
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text=context_prompt),
+                        types.Part.from_text(text="TILE IMAGE:"),
+                        types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=tile_bytes)),
+                        types.Part.from_text(text="HOUSE/ROOM IMAGE:"),
+                        types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=home_bytes)),
+                    ],
+                ),
+            ]
+
+            context_config = types.GenerateContentConfig(
+                response_modalities=["TEXT"]
             )
 
-            # Extract text response
-            context_text = context_response.text if hasattr(context_response, 'text') else ""
-            logger.info(f"🔍 Context analysis response:\n{context_text}")
+            # Call with retry logic
+            context_response = call_gemini_with_retry(context_contents, context_config, max_retries=2, timeout=60)
 
-            # Parse JSON response
-            # Try to extract JSON from the response (it might have markdown code blocks)
+            # Parse response safely
+            context_text = context_response.text if hasattr(context_response, 'text') else ""
+
+            if not context_text or len(context_text.strip()) == 0:
+                raise ValueError("Empty context response")
+
+            logger.info(f"🔍 Context analysis response:\n{context_text[:500]}...")
+
+            # Extract JSON with multiple fallback patterns
             json_match = re.search(r'\{[^}]+\}', context_text, re.DOTALL)
             if json_match:
-                context = json.loads(json_match.group(0))
-                logger.info(f"✅ Parsed context: {context}")
+                parsed_context = json.loads(json_match.group(0))
+
+                # Validate required fields
+                if all(key in parsed_context for key in ["surface_type", "region_description"]):
+                    context.update(parsed_context)
+                    logger.info(f"✅ Parsed context: {context}")
+                else:
+                    logger.warning("⚠️ Incomplete context JSON, using defaults")
             else:
-                raise ValueError("No JSON object found in response")
+                logger.warning("⚠️ No JSON found in context response, using defaults")
 
         except Exception as e:
-            # Fallback to defaults if parsing fails
-            logger.warning(f"⚠️ Context parsing failed: {str(e)}. Using defaults.")
-            context = {
-                "surface_type": "floor",
-                "estimated_tile_size": "medium",
-                "region_description": "bottom part of the image",
-                "lighting_condition": "natural"
-            }
+            logger.warning(f"⚠️ Context analysis failed: {str(e)}. Using default context.")
 
-        # Step 5: PASS 2 - Final Generation
-        # Second Gemini call for actual rendering using extracted context
-        logger.info("🎨 Pass 2: Generating final visualization...")
+        # Step 5: PASS 2 - Final Generation with improved prompt
+        logger.info("🎨 Pass 2: Generating final visualization with robust prompt...")
 
         user_prompt = body.prompt if body.prompt else ""
 
-        generation_prompt = f"""You are creating a realistic tile visualization.
+        # Build comprehensive, bulletproof generation prompt
+        generation_prompt = f"""You are an expert visual compositor creating a photorealistic tile visualization.
 
-Apply the tile from the second image to the {context.get('region_description', 'appropriate area')} of the first image ({context.get('surface_type', 'floor')}).
-Keep the lighting ({context.get('lighting_condition', 'natural')}) consistent with the original house photo.
-Preserve all objects, shadows, and wall colors exactly.
-Estimate tile repetition and scaling naturally based on its apparent size ({context.get('estimated_tile_size', 'medium')}).
-Do not distort or duplicate the pattern unnaturally.
-Output a photo-realistic render that looks like an authentic photograph.
-"""
+TASK:
+You have two images:
+1. A house or room photo (base image)
+2. A tile sample (to be applied)
+
+INSTRUCTIONS:
+Step 1: REGION IDENTIFICATION
+- Apply tiles to: {context.get('region_description', 'the appropriate floor or wall area')}
+- Surface type: {context.get('surface_type', 'floor')}
+- Never place tiles where they wouldn't naturally appear
+- Use context clues (furniture position, room layout) to infer correct boundaries
+
+Step 2: PHYSICAL REALISM
+- Maintain perfect perspective alignment with room geometry
+- Preserve existing lighting ({context.get('lighting_condition', 'natural ambient')})
+- Keep all shadows, reflections, and ambient occlusion intact
+- Respect object boundaries (furniture, fixtures, people) — do not tile over them
+
+Step 3: TILE APPLICATION
+- Tile size appears: {context.get('estimated_tile_size', 'medium')}
+- Maintain correct aspect ratio and pattern alignment
+- Ensure realistic grout lines with consistent spacing
+- Keep tile color and texture IDENTICAL to the tile image
+- If tile is glossy, reflect ambient light naturally
+- If tile has pattern, maintain continuity without warping
+
+Step 4: QUALITY REQUIREMENTS
+- Output must look like an authentic architectural photograph
+- No distortion, duplication, or pattern breaks
+- Soft blending at tile boundaries for seamless integration
+- Preserve wall colors and existing textures exactly
+- Same input must yield consistent, deterministic output
+
+CRITICAL RULES:
+❌ Do NOT tile over: ceilings, doors, windows, furniture, decorative elements, people
+❌ Do NOT add extra reflections or tiles outside intended regions
+❌ Do NOT change lighting or wall colors
+❌ Do NOT warp or stretch the tile pattern
+
+✅ DO maintain physical realism and perspective
+✅ DO preserve scene integrity and lighting
+✅ DO apply tiles only where they logically belong
+✅ DO ensure color fidelity to original tile image"""
 
         if user_prompt and user_prompt.strip():
-            generation_prompt += f"\nUser request: {user_prompt.strip()}"
+            generation_prompt += f"\n\n🎯 USER REQUEST (highest priority): {user_prompt.strip()}"
 
-        logger.info(f"🎨 Final generation prompt:\n{generation_prompt}")
+        logger.info(f"🎨 Using generation prompt (length: {len(generation_prompt)} chars)")
 
-        # Build final generation content
+        # Build generation content
         contents = [
             types.Content(
                 role="user",
                 parts=[
                     types.Part.from_text(text=generation_prompt),
-                    types.Part.from_text(text="TILE IMAGE to apply:"),
+                    types.Part.from_text(text="TILE IMAGE (to apply):"),
                     types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=tile_bytes)),
                     types.Part.from_text(text="HOUSE/ROOM IMAGE (base):"),
                     types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=home_bytes)),
@@ -285,131 +369,200 @@ Output a photo-realistic render that looks like an authentic photograph.
             ),
         ]
 
-        # Configure to return image output
         config = types.GenerateContentConfig(
             response_modalities=["IMAGE"]
         )
 
-        # Step 6: Call Gemini API and stream response
-        file_index = 0
+        # Step 6: Call Gemini API with retry logic and fallback
         image_saved = False
+        data_buffer = None
+        generation_attempts = 0
+        max_generation_attempts = 2
 
-        for chunk in gemini_client.models.generate_content_stream(
-            model=model,
-            contents=contents,
-            config=config,
-        ):
-            # Check if chunk contains valid image data
-            if (
-                not chunk.candidates
-                or not chunk.candidates[0].content
-                or not chunk.candidates[0].content.parts
-            ):
-                continue
+        while not image_saved and generation_attempts < max_generation_attempts:
+            generation_attempts += 1
 
-            part = chunk.candidates[0].content.parts[0]
+            try:
+                logger.info(f"🎨 Image generation attempt {generation_attempts}/{max_generation_attempts}...")
 
-            # Extract inline image data if present
-            if getattr(part, "inline_data", None) and part.inline_data.data:
-                inline_data = part.inline_data
-                data_buffer = inline_data.data
+                # Try complex prompt first, then fallback to simplified
+                if generation_attempts == 2:
+                    logger.warning("⚠️ Falling back to simplified prompt...")
+                    simplified_prompt = f"""Replace only the visible {context.get('surface_type', 'floor')} area with the tile texture.
+Keep everything else (walls, objects, lighting) identical to the original photo.
+Ensure tiles are evenly spaced and maintain their original color."""
 
-                # Determine file extension from MIME type
-                file_extension = mimetypes.guess_extension(inline_data.mime_type)
-                if not file_extension:
-                    file_extension = ".jpg"  # Default to .jpg
+                    if user_prompt and user_prompt.strip():
+                        simplified_prompt += f"\nUser note: {user_prompt.strip()}"
 
-                # Generate timestamp-based filename for uniqueness
-                file_name = f"generated_output_{int(time.time())}.jpg"
-                local_path = GENERATED_DIR / file_name
+                    # Rebuild with simplified prompt
+                    contents = [
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part.from_text(text=simplified_prompt),
+                                types.Part.from_text(text="TILE:"),
+                                types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=tile_bytes)),
+                                types.Part.from_text(text="ROOM:"),
+                                types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=home_bytes)),
+                            ],
+                        ),
+                    ]
 
-                # Save image to local disk first (async for better performance)
-                async with aiofiles.open(local_path, "wb") as f:
-                    await f.write(data_buffer)
+                # Stream response with timeout handling
+                chunk_count = 0
+                for chunk in gemini_client.models.generate_content_stream(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                ):
+                    chunk_count += 1
 
-                logger.info(f"✅ Generated image saved locally: {local_path}")
+                    # Check if chunk contains valid image data
+                    if (
+                        not chunk.candidates
+                        or not chunk.candidates[0].content
+                        or not chunk.candidates[0].content.parts
+                    ):
+                        continue
 
-                # Step 6: Upload to Supabase Storage
-                try:
-                    async with aiofiles.open(local_path, "rb") as f:
-                        file_data = await f.read()
-                        supabase.storage.from_(bucket_name).upload(
-                            file_name,
-                            file_data,
-                            file_options={"content-type": "image/jpeg"}
-                        )
-                    logger.info(f"✅ Uploaded to Supabase Storage: {file_name}")
-                except Exception as upload_error:
-                    logger.error(f"⚠️  Supabase upload error: {upload_error}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to upload to Supabase Storage: {str(upload_error)}"
-                    )
+                    part = chunk.candidates[0].content.parts[0]
 
-                # Get public URL
-                public_url = supabase.storage.from_(bucket_name).get_public_url(file_name)
-                logger.info(f"✅ Public URL: {public_url}")
+                    # Extract inline image data if present
+                    if getattr(part, "inline_data", None) and part.inline_data.data:
+                        inline_data = part.inline_data
+                        data_buffer = inline_data.data
 
-                # Step 7: Insert record into database with authenticated user_id
-                try:
-                    # Save user hint (not full AI prompt) for database record
-                    user_prompt = body.prompt if body.prompt else "Auto-generated"
+                        if not data_buffer or len(data_buffer) == 0:
+                            raise ValueError("Empty image data received")
 
-                    # Note: tile_id is intentionally NOT included here
-                    # Generated images remain unlinked until user explicitly adds reference via PATCH endpoint
-                    db_record = {
-                        "user_id": user_id,  # Authenticated user from JWT
-                        "home_id": body.home_id,  # Home ID from request (optional)
-                        "chat_id": body.chat_id,  # Chat ID from request (optional)
-                        "prompt": user_prompt,
-                        "image_url": public_url,
+                        logger.info(f"✅ Image data received (size: {len(data_buffer)} bytes)")
+
+                        # Generate timestamp-based filename for uniqueness
+                        file_name = f"generated_output_{int(time.time())}.jpg"
+                        local_path = GENERATED_DIR / file_name
+
+                        # Save image to local disk first (async for better performance)
+                        async with aiofiles.open(local_path, "wb") as f:
+                            await f.write(data_buffer)
+
+                        image_saved = True
+                        logger.info(f"✅ Generated image saved locally: {local_path}")
+                        break  # Exit chunk loop
+
+                if not image_saved:
+                    raise ValueError(f"No image data received after {chunk_count} chunks")
+
+                # If we got here, image was saved successfully
+                break  # Exit retry loop
+
+            except Exception as e:
+                logger.error(f"❌ Generation attempt {generation_attempts} failed: {str(e)}")
+
+                if generation_attempts >= max_generation_attempts:
+                    # All attempts failed, return error
+                    logger.error("❌ All generation attempts exhausted")
+                    return {
+                        "success": False,
+                        "error": "Image generation failed. The AI model could not produce a valid visualization. Please try again with different images or contact support."
                     }
 
-                    result = supabase.table("generated_images").insert(db_record).execute()
-                    logger.info(f"✅ Database record inserted for user {user_id[:8]}... (home_id={body.home_id}, chat_id={body.chat_id}, tile_id=NULL): {result.data}")
+                # Wait before next attempt
+                time.sleep(3)
 
-                    # Get the inserted record with all fields
-                    if not result.data:
-                        raise HTTPException(
-                            status_code=500,
-                            detail="Failed to retrieve inserted record"
-                        )
+        # Verify we have image data before continuing
+        if not image_saved or not data_buffer:
+            logger.error("❌ No image data available after all attempts")
+            return {
+                "success": False,
+                "error": "Image generation failed to produce output. Please try again."
+            }
 
-                    inserted_record = result.data[0]
+        # Step 7: Upload to Supabase Storage with error handling
+        try:
+            logger.info(f"📤 Uploading to Supabase Storage: {file_name}")
+            async with aiofiles.open(local_path, "rb") as f:
+                file_data = await f.read()
+                supabase.storage.from_(bucket_name).upload(
+                    file_name,
+                    file_data,
+                    file_options={"content-type": "image/jpeg"}
+                )
+            logger.info(f"✅ Uploaded to Supabase Storage: {file_name}")
+        except Exception as upload_error:
+            logger.error(f"❌ Supabase upload error: {upload_error}")
+            return {
+                "success": False,
+                "error": f"Image generated successfully but failed to upload to storage: {str(upload_error)}"
+            }
 
-                except Exception as db_error:
-                    logger.error(f"⚠️  Database insert error: {db_error}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to insert database record: {str(db_error)}"
-                    )
+        # Get public URL
+        try:
+            public_url = supabase.storage.from_(bucket_name).get_public_url(file_name)
+            logger.info(f"✅ Public URL: {public_url}")
+        except Exception as url_error:
+            logger.error(f"❌ Failed to get public URL: {url_error}")
+            return {
+                "success": False,
+                "error": "Image uploaded but failed to generate public URL. Please contact support."
+            }
 
-                # Step 8: Return success response with full image record
+        # Step 8: Insert record into database with authenticated user_id
+        try:
+            # Save user hint (not full AI prompt) for database record
+            user_prompt_text = body.prompt if body.prompt else "Auto-generated"
+
+            # Note: tile_id is intentionally NOT included here
+            # Generated images remain unlinked until user explicitly adds reference via PATCH endpoint
+            db_record = {
+                "user_id": user_id,  # Authenticated user from JWT
+                "home_id": body.home_id,  # Home ID from request (optional)
+                "chat_id": body.chat_id,  # Chat ID from request (optional)
+                "prompt": user_prompt_text,
+                "image_url": public_url,
+            }
+
+            result = supabase.table("generated_images").insert(db_record).execute()
+            logger.info(f"✅ Database record inserted for user {user_id[:8]}... (home_id={body.home_id}, chat_id={body.chat_id})")
+
+            # Get the inserted record with all fields
+            if not result.data:
+                logger.error("❌ No data returned from database insert")
                 return {
-                    "success": True,
-                    "image": inserted_record
+                    "success": False,
+                    "error": "Image generated but failed to save record. Please contact support."
                 }
 
-        # If we get here, no image was returned
-        raise HTTPException(
-            status_code=500,
-            detail="No image parts returned from Gemini API"
-        )
+            inserted_record = result.data[0]
+            logger.info("✅ Image generation completed successfully!")
+
+            # Return success response
+            return {
+                "success": True,
+                "image": inserted_record
+            }
+
+        except Exception as db_error:
+            logger.error(f"❌ Database insert error: {db_error}")
+            return {
+                "success": False,
+                "error": f"Image generated but failed to save to database: {str(db_error)}"
+            }
 
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
 
     except Exception as e:
-        # Catch-all for unexpected errors
+        # Catch-all for unexpected errors - return friendly error instead of 500
         import traceback
-        logger.error(f"❌ Error in /generate: {str(e)}")
+        logger.error(f"❌ Unexpected error in /generate: {str(e)}")
         logger.error(traceback.format_exc())
 
-        raise HTTPException(
-            status_code=500,
-            detail=f"Image generation failed: {str(e)}"
-        )
+        return {
+            "success": False,
+            "error": "An unexpected error occurred during image generation. Please try again or contact support if the issue persists."
+        }
 
 
 @router.patch("/api/generated/{image_id}", dependencies=[Depends(verify_token)])
