@@ -37,8 +37,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Enable Gzip compression for responses > 1KB (reduces response size by 60-80%)
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Enable Gzip compression for responses > 500 bytes (reduces response size by 60-80%)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
 # Cache-Control middleware for read-only GET endpoints

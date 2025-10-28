@@ -44,8 +44,8 @@ class SupabaseService:
                 {"content-type": f"image/{file_extension}"}
             )
 
-            # Get public URL
-            public_url = self.client.storage.from_(self.bucket).get_public_url(filename)
+            # Get optimized public URL with CDN caching and compression
+            public_url = f"{self.url}/storage/v1/render/image/public/{self.bucket}/{filename}?width=512&quality=80"
 
             return public_url
         except Exception as e:

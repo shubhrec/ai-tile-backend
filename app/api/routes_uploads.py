@@ -66,8 +66,9 @@ async def upload_file(
                 detail=f"Upload failed: {str(upload_error)}"
             )
 
-        # Get public URL
-        public_url = supabase.storage.from_(bucket).get_public_url(file_name)
+        # Get optimized public URL with CDN caching and compression
+        SUPABASE_URL = os.getenv("SUPABASE_URL")
+        public_url = f"{SUPABASE_URL}/storage/v1/render/image/public/{bucket}/{file_name}?width=512&quality=80"
 
         return {
             "success": True,
@@ -110,12 +111,13 @@ async def list_files(
             else:
                 files_data = []
 
-            # Generate public URLs for all files
+            # Generate optimized public URLs for all files with CDN caching
+            SUPABASE_URL = os.getenv("SUPABASE_URL")
             urls = []
             for item in files_data:
                 if isinstance(item, dict) and 'name' in item:
                     file_name = item['name']
-                    public_url = supabase.storage.from_(bucket).get_public_url(file_name)
+                    public_url = f"{SUPABASE_URL}/storage/v1/render/image/public/{bucket}/{file_name}?width=512&quality=80"
                     urls.append(public_url)
 
             logger.info(f"✅ Listed {len(urls)} files from bucket '{bucket}'")

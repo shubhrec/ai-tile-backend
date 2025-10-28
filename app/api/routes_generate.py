@@ -278,8 +278,9 @@ async def generate_image(request: Request, body: GenerateRequest):
                         detail=f"Failed to upload to Supabase Storage: {str(upload_error)}"
                     )
 
-                # Get public URL
-                public_url = supabase.storage.from_(bucket_name).get_public_url(file_name)
+                # Get optimized public URL with CDN caching and compression
+                SUPABASE_URL = os.getenv("SUPABASE_URL")
+                public_url = f"{SUPABASE_URL}/storage/v1/render/image/public/{bucket_name}/{file_name}?width=512&quality=80"
                 logger.info(f"✅ Public URL: {public_url}")
 
                 # Step 7: Insert record into database with authenticated user_id
