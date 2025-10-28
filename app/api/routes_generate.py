@@ -7,13 +7,14 @@ import httpx
 import time
 import logging
 import aiofiles
+import json
+import re
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, Field
 from typing import Optional
 from google import genai
 from google.genai import types
-from app.services.prompt_builder import build_prompt
 from app.services.auth import verify_token
 from app.services.supabase_client import supabase
 
@@ -98,15 +99,14 @@ async def generate_image(request: Request, body: GenerateRequest):
                 detail="Missing home source: provide either home_url or home_id"
             )
 
-        # Step 0.6: Fetch URLs and metadata from database if IDs provided but URLs missing
+        # Step 0.6: Fetch URLs from database if IDs provided but URLs missing
         tile_url = body.tile_url
         home_url = body.home_url
-        tile_metadata = {}
 
         if not tile_url and body.tile_id:
-            logger.info(f"📥 Fetching tile data from database for tile_id={body.tile_id}")
+            logger.info(f"📥 Fetching tile URL from database for tile_id={body.tile_id}")
             tile_res = supabase.table("tiles")\
-                .select("image_url, size, type")\
+                .select("image_url")\
                 .eq("id", body.tile_id)\
                 .eq("user_id", user_id)\
                 .execute()
@@ -117,12 +117,8 @@ async def generate_image(request: Request, body: GenerateRequest):
                     detail=f"Tile with ID {body.tile_id} not found or not owned by user"
                 )
 
-            tile_data = tile_res.data[0]
-            tile_url = tile_data["image_url"]
-            tile_metadata["size"] = tile_data.get("size")
-            tile_metadata["type"] = tile_data.get("type")
+            tile_url = tile_res.data[0]["image_url"]
             logger.info(f"✅ Fetched tile URL: {tile_url}")
-            logger.info(f"✅ Fetched tile metadata: size={tile_metadata.get('size')}, type={tile_metadata.get('type')}")
 
         if not home_url and body.home_id:
             logger.info(f"📥 Fetching home URL from database for home_id={body.home_id}")
@@ -184,57 +180,117 @@ async def generate_image(request: Request, body: GenerateRequest):
                     detail=f"Failed to download images: {str(e)}"
                 )
 
-        # Step 3: Build intelligent prompt using prompt builder with tile metadata
-        user_hint = body.prompt if body.prompt else ""
-        surface = body.surface if hasattr(body, 'surface') else "auto"
-
-        # Generate comprehensive prompt with tile metadata
-        ai_prompt = build_prompt(
-            user_hint=user_hint,
-            surface=surface,
-            tile_size=tile_metadata.get("size"),
-            tile_type=tile_metadata.get("type")
-        )
-
-        # Log the generated prompt for debugging
-        logger.info(f"🎨 Generated AI Prompt:\n{ai_prompt}")
-        logger.info(f"📝 User hint: '{user_hint}'")
-        logger.info(f"🎯 Surface: {surface}")
-        logger.info(f"📏 Tile size: {tile_metadata.get('size', 'default')}")
-        logger.info(f"🎨 Tile type: {tile_metadata.get('type', 'default')}")
-
-        # Step 4: Initialize Gemini client
+        # Step 3: Initialize Gemini client
         gemini_client = genai.Client(api_key=api_key)
         model = "gemini-2.5-flash-image"
 
-        # Step 5: Build request content with explicit differentiation
-        # The Parts list includes:
-        # - AI-generated comprehensive prompt
-        # - Clear labeling of TILE image
-        # - Tile image data
-        # - Clear labeling of HOUSE image
-        # - House image data
-        contents = [
+        # Step 4: PASS 1 - Context Understanding
+        # First Gemini call to analyze both images and extract context
+        logger.info("🔍 Pass 1: Analyzing images for context understanding...")
+
+        context_prompt = """Analyze the two provided images.
+- Identify whether the tile is meant for floors or walls based on texture and pattern.
+- Estimate the tile's aspect ratio and visual size.
+- Determine which parts of the house image are most suitable for applying the tile.
+- Summarize in one short JSON object:
+  {
+    "surface_type": "...",
+    "estimated_tile_size": "...",
+    "region_description": "...",
+    "lighting_condition": "..."
+  }
+"""
+
+        context_contents = [
             types.Content(
                 role="user",
                 parts=[
-                    types.Part.from_text(text=ai_prompt),
-                    types.Part.from_text(text="The following image is the TILE design that should be applied:"),
+                    types.Part.from_text(text=context_prompt),
+                    types.Part.from_text(text="TILE IMAGE:"),
                     types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=tile_bytes)),
-                    types.Part.from_text(text="The following image is the HOUSE/ROOM where the tile should be installed:"),
+                    types.Part.from_text(text="HOUSE/ROOM IMAGE:"),
                     types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=home_bytes)),
                 ],
             ),
         ]
 
-        logger.info("📤 Sending request to Gemini API with differentiated images")
+        # Configure for TEXT response
+        context_config = types.GenerateContentConfig(
+            response_modalities=["TEXT"]
+        )
+
+        # Call Gemini for context analysis
+        try:
+            context_response = gemini_client.models.generate_content(
+                model=model,
+                contents=context_contents,
+                config=context_config,
+            )
+
+            # Extract text response
+            context_text = context_response.text if hasattr(context_response, 'text') else ""
+            logger.info(f"🔍 Context analysis response:\n{context_text}")
+
+            # Parse JSON response
+            # Try to extract JSON from the response (it might have markdown code blocks)
+            json_match = re.search(r'\{[^}]+\}', context_text, re.DOTALL)
+            if json_match:
+                context = json.loads(json_match.group(0))
+                logger.info(f"✅ Parsed context: {context}")
+            else:
+                raise ValueError("No JSON object found in response")
+
+        except Exception as e:
+            # Fallback to defaults if parsing fails
+            logger.warning(f"⚠️ Context parsing failed: {str(e)}. Using defaults.")
+            context = {
+                "surface_type": "floor",
+                "estimated_tile_size": "medium",
+                "region_description": "bottom part of the image",
+                "lighting_condition": "natural"
+            }
+
+        # Step 5: PASS 2 - Final Generation
+        # Second Gemini call for actual rendering using extracted context
+        logger.info("🎨 Pass 2: Generating final visualization...")
+
+        user_prompt = body.prompt if body.prompt else ""
+
+        generation_prompt = f"""You are creating a realistic tile visualization.
+
+Apply the tile from the second image to the {context.get('region_description', 'appropriate area')} of the first image ({context.get('surface_type', 'floor')}).
+Keep the lighting ({context.get('lighting_condition', 'natural')}) consistent with the original house photo.
+Preserve all objects, shadows, and wall colors exactly.
+Estimate tile repetition and scaling naturally based on its apparent size ({context.get('estimated_tile_size', 'medium')}).
+Do not distort or duplicate the pattern unnaturally.
+Output a photo-realistic render that looks like an authentic photograph.
+"""
+
+        if user_prompt and user_prompt.strip():
+            generation_prompt += f"\nUser request: {user_prompt.strip()}"
+
+        logger.info(f"🎨 Final generation prompt:\n{generation_prompt}")
+
+        # Build final generation content
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(text=generation_prompt),
+                    types.Part.from_text(text="TILE IMAGE to apply:"),
+                    types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=tile_bytes)),
+                    types.Part.from_text(text="HOUSE/ROOM IMAGE (base):"),
+                    types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=home_bytes)),
+                ],
+            ),
+        ]
 
         # Configure to return image output
         config = types.GenerateContentConfig(
             response_modalities=["IMAGE"]
         )
 
-        # Step 5: Call Gemini API and stream response
+        # Step 6: Call Gemini API and stream response
         file_index = 0
         image_saved = False
 
