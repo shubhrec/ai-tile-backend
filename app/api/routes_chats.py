@@ -155,11 +155,12 @@ async def get_chat_with_images(request: Request, chat_id: int):
         chat = chat_res.data[0]
 
         # Step 2: Fetch associated generated images with tile names (limit results for performance)
+        # Order by created_at ASC so oldest images appear first (newest at bottom, like a chat)
         images_res = supabase.table("generated_images")\
             .select("id, chat_id, image_url, prompt, kept, tile_id, home_id, created_at, tiles(name)")\
             .eq("chat_id", chat_id)\
             .eq("user_id", user_id)\
-            .order("created_at", desc=True)\
+            .order("created_at", desc=False)\
             .limit(100)\
             .execute()
 

@@ -324,61 +324,78 @@ Output ONLY a JSON object:
         if is_multi_stage:
             # Multi-stage continuation prompt
             tile_name = "provided tile image"
-            generation_prompt = f"""You are performing a *continuation* visualization task.
+            generation_prompt = f"""You are performing a *continuation* visualization task for marketing and sales.
 The base image already contains previous tile renderings on some surfaces.
 
+IMPORTANT CONTEXT:
+This visualization is for SELLING TILES. The output must be attractive, clean, and professionally styled to showcase BOTH the existing and new tiles in the best possible light.
+
 CRITICAL CONTEXT:
-- The base image you're working with already has tiles applied to certain surfaces
+- The base image you're working with already has tiles applied to certain surfaces (may be interior or exterior)
 - Your task is to apply a NEW tile to a DIFFERENT surface
 - DO NOT modify or alter any previously tiled areas
+- This is a continuation of a professional tile showcase
 
 INSTRUCTIONS:
 
-Step 1: PRESERVE EXISTING WORK
-- Keep all existing surfaces, objects, and lighting EXACTLY the same
+Step 1: PRESERVE & ENHANCE EXISTING WORK
+- Keep all existing tiled surfaces EXACTLY the same
 - Identify which surfaces already have tiles applied
 - DO NOT modify previously tiled areas under any circumstances
 - Maintain all existing shadows, reflections, and lighting conditions
+- If there are any minor imperfections in the base image (clutter not related to tiles), subtly clean them up while preserving all tile work
+- Keep the professional, magazine-worthy aesthetic
 
 Step 2: IDENTIFY NEW SURFACE
-- Identify a *new logical surface* (e.g., wall, counter, backsplash, etc.) to apply the new tile
+- Identify a *new logical surface* (e.g., wall, counter, backsplash, exterior wall, facade, etc.) to apply the new tile
 - Choose a surface that is DIFFERENT from surfaces that already have tiles
-- Common progression: floor → wall → backsplash → countertop
-- Ensure the chosen surface makes architectural sense
+- Common progressions:
+  * Interior: floor → wall → backsplash → countertop
+  * Exterior: patio/walkway → exterior walls → facade → outdoor features
+- IMPORTANT: For exterior spaces, consider applying tiles to outer walls, building facades, or outdoor surfaces
+- Ensure the chosen surface makes architectural sense and enhances the overall visualization
 
 Step 3: APPLY NEW TILE
 - Apply the new tile ({tile_name}) only on the specified NEW surface
 - Surface type guidance: {context.get('surface_type', 'auto')}
 - Tile size appears: {context.get('estimated_tile_size', 'medium')}
 - Keep tile color and texture IDENTICAL to the new tile image provided
-- Maintain correct perspective and alignment with the room geometry
+- Maintain correct perspective and alignment with the room/building geometry
+- For exterior applications: Ensure tiles look weather-appropriate and structurally sound
+- Make the new tile application look professional and aspirational
 
 Step 4: MAINTAIN REALISM
 - Preserve reflections and shadows from the base image
 - Adjust perspective naturally for the new surface
-- Match color tones between old and new surfaces
+- Match color tones and lighting between old and new surfaces
 - Avoid any blending artifacts or duplicate tiles
 - Ensure seamless integration with existing tiled surfaces
-- Maintain consistent lighting across all surfaces
+- Maintain consistent, bright, appealing lighting across all surfaces
+- Create a cohesive, professional look
 
 Step 5: QUALITY REQUIREMENTS
-- Output must look like a single, cohesive architectural photograph
+- Output must look like a single, cohesive professional architectural photograph
+- Magazine-worthy quality that makes customers want to buy these tiles
 - No visible seams between old and new tile applications
-- Both old and new tiles should be clearly visible in the final output
+- Both old and new tiles should be clearly visible and beautifully showcased in the final output
 - Preserve the exact appearance of previously applied tiles
 - Same lighting and color grading throughout the image
+- Professional staging and styling throughout
 
 CRITICAL RULES:
 ❌ Do NOT modify previously tiled areas
-❌ Do NOT change existing lighting or shadows
+❌ Do NOT change existing lighting or shadows dramatically
 ❌ Do NOT add tiles to surfaces that already have tiles
-❌ Do NOT alter wall colors or existing textures
 ❌ Do NOT create duplicate or overlapping tile patterns
+❌ Do NOT ignore exterior walls - continuation can include outer walls when appropriate
+❌ Do NOT leave clutter or mess visible
 
 ✅ DO keep existing tile work exactly as is
-✅ DO apply new tile to a different, logical surface
+✅ DO apply new tile to a different, logical surface (interior OR exterior)
 ✅ DO maintain physical realism and perspective
-✅ DO ensure both old and new tiles are visible"""
+✅ DO ensure both old and new tiles are visible and beautifully showcased
+✅ DO create a professional, aspirational visualization
+✅ DO apply tiles to exterior walls, facades, or outdoor surfaces when contextually appropriate"""
 
             if user_prompt and user_prompt.strip():
                 generation_prompt += f"\n\n🎯 USER REQUEST (highest priority): '{user_prompt.strip()}'"
@@ -386,51 +403,72 @@ CRITICAL RULES:
             logger.info(f"✅ Multi-stage generation: Used base_image_url + new tile")
         else:
             # Standard first-generation prompt
-            generation_prompt = f"""You are an expert visual compositor creating a photorealistic tile visualization.
+            generation_prompt = f"""You are an expert visual compositor creating a photorealistic tile visualization for marketing and sales.
 
 TASK:
 You have two images:
-1. A house or room photo (base image)
+1. A house or room photo (base image) - may be interior or exterior
 2. A tile sample (to be applied)
 
+IMPORTANT CONTEXT:
+This visualization is for SELLING TILES. The output must be attractive, clean, and professionally styled to showcase the tiles in the best possible light.
+
 INSTRUCTIONS:
-Step 1: REGION IDENTIFICATION
+Step 1: IMAGE ENHANCEMENT & CLEANUP
+- If the base image has clutter, mess, or unattractive elements, CLEAN THEM UP
+- Remove or minimize: scattered objects, clutter, dirt, stains, damage, poor styling
+- Enhance the space to look professionally staged and magazine-worthy
+- Maintain the architectural structure but improve the aesthetics
+- Make the scene bright, inviting, and appealing to potential customers
+- The goal is to create an aspirational visualization that sells tiles
+
+Step 2: REGION IDENTIFICATION
 - Apply tiles to: {context.get('region_description', 'the appropriate floor or wall area')}
 - Surface type: {context.get('surface_type', 'floor')}
+- IMPORTANT: If this is an exterior photo (house facade, outdoor patio, etc.), apply tiles to EXTERIOR WALLS, outdoor floors, or facades as appropriate
+- For INTERIOR spaces: Apply to floors, walls, backsplashes, or shower areas as appropriate
+- For EXTERIOR spaces: Apply to outer walls, facades, patios, walkways, or outdoor surfaces
+- Use context clues (furniture position, room layout, architectural features) to infer correct boundaries
 - Never place tiles where they wouldn't naturally appear
-- Use context clues (furniture position, room layout) to infer correct boundaries
 
-Step 2: PHYSICAL REALISM
-- Maintain perfect perspective alignment with room geometry
-- Preserve existing lighting ({context.get('lighting_condition', 'natural ambient')})
-- Keep all shadows, reflections, and ambient occlusion intact
-- Respect object boundaries (furniture, fixtures, people) — do not tile over them
+Step 3: PHYSICAL REALISM
+- Maintain perfect perspective alignment with room/building geometry
+- Preserve enhanced lighting ({context.get('lighting_condition', 'natural ambient')}) - make it bright and appealing
+- Keep all shadows, reflections, and ambient occlusion realistic but polished
+- Respect object boundaries (furniture, fixtures, people, architectural elements) — do not tile over them
+- For exterior applications: Consider weatherproofing, outdoor lighting, and natural context
 
-Step 3: TILE APPLICATION
+Step 4: TILE APPLICATION
 - Tile size appears: {context.get('estimated_tile_size', 'medium')}
 - Maintain correct aspect ratio and pattern alignment
 - Ensure realistic grout lines with consistent spacing
 - Keep tile color and texture IDENTICAL to the tile image
-- If tile is glossy, reflect ambient light naturally
+- If tile is glossy, reflect ambient light naturally to enhance visual appeal
 - If tile has pattern, maintain continuity without warping
+- For exterior walls: Ensure tiles look weather-appropriate and structurally sound
 
-Step 4: QUALITY REQUIREMENTS
-- Output must look like an authentic architectural photograph
+Step 5: QUALITY REQUIREMENTS
+- Output must look like a professional architectural photograph from a design magazine
+- Create an aspirational, beautiful space that makes customers want to buy these tiles
 - No distortion, duplication, or pattern breaks
 - Soft blending at tile boundaries for seamless integration
-- Preserve wall colors and existing textures exactly
-- Same input must yield consistent, deterministic output
+- Enhanced wall colors and textures to complement the tiles
+- Professional staging and styling throughout
+- Bright, attractive lighting that showcases the tiles beautifully
 
 CRITICAL RULES:
 ❌ Do NOT tile over: ceilings, doors, windows, furniture, decorative elements, people
 ❌ Do NOT add extra reflections or tiles outside intended regions
-❌ Do NOT change lighting or wall colors
+❌ Do NOT leave clutter or mess visible - clean up the space
 ❌ Do NOT warp or stretch the tile pattern
+❌ Do NOT ignore exterior walls - tiles can and should be applied to outer walls when appropriate
 
 ✅ DO maintain physical realism and perspective
-✅ DO preserve scene integrity and lighting
-✅ DO apply tiles only where they logically belong
-✅ DO ensure color fidelity to original tile image"""
+✅ DO clean up and enhance the base image for marketing appeal
+✅ DO apply tiles to exterior walls, facades, and outdoor surfaces when contextually appropriate
+✅ DO create an attractive, magazine-worthy visualization
+✅ DO ensure color fidelity to original tile image
+✅ DO make the space look professionally staged and inviting"""
 
             if user_prompt and user_prompt.strip():
                 generation_prompt += f"\n\n🎯 USER REQUEST (highest priority): {user_prompt.strip()}"
