@@ -30,9 +30,10 @@ router = APIRouter()
 class GenerateRequest(BaseModel):
     """Request payload for /generate endpoint."""
     tile_url: Optional[str] = Field(None, description="URL of the tile image (provide either tile_url or tile_id)")
-    home_url: Optional[str] = Field(None, description="URL of the home/room image (provide either home_url or home_id)")
+    home_url: Optional[str] = Field(None, description="URL of the home/room image (provide either home_url, home_id, or base_image_url)")
     tile_id: Optional[int] = Field(None, description="ID of the tile from database (provide either tile_url or tile_id)")
-    home_id: Optional[int] = Field(None, description="ID of the home from database (provide either home_url or home_id)")
+    home_id: Optional[int] = Field(None, description="ID of the home from database (provide either home_url, home_id, or base_image_url)")
+    base_image_url: Optional[str] = Field(None, description="URL of a previously generated image to use as base for multi-stage generation")
     chat_id: Optional[int] = Field(None, description="ID of the chat session (optional)")
     prompt: str = Field(
         default="",
@@ -63,21 +64,29 @@ async def generate_image(request: Request, body: GenerateRequest):
 
     **Authentication Required:** Bearer token in Authorization header
 
-    This endpoint accepts either URLs or IDs for tile and home images:
-    - If tile_id/home_id provided: Fetches image URLs from database
-    - If tile_url/home_url provided: Uses URLs directly
-    - At least one source (ID or URL) must be provided for both tile and home
+    This endpoint supports two generation modes:
+
+    1. **Standard Generation**: Apply tiles to a new room/home image
+       - If tile_id/home_id provided: Fetches image URLs from database
+       - If tile_url/home_url provided: Uses URLs directly
+       - At least one source (ID or URL) must be provided for both tile and home
+
+    2. **Multi-Stage Generation**: Apply new tiles to a previously generated image
+       - Provide base_image_url: URL of a previously generated image
+       - The new tile will be applied to a different surface
+       - Preserves existing tile work and applies new tile to complementary surfaces
 
     Process:
     1. Validates input and fetches URLs from database if needed
-    2. Downloads both tile and home images from URLs
+    2. Downloads both tile and base images (home or previous generation) from URLs
     3. Converts them to byte arrays
-    4. Sends them + text prompt to Gemini 2.5 Flash Image API
-    5. Receives generated image from the API
-    6. Saves it locally to generated/ folder
-    7. Uploads to Supabase Storage
-    8. Inserts record into database with chat_id if provided
-    9. Returns the public URL
+    4. Builds appropriate prompt (continuation or standard) based on input
+    5. Sends images + text prompt to Gemini 2.5 Flash Image API
+    6. Receives generated image from the API
+    7. Saves it locally to generated/ folder
+    8. Uploads to Supabase Storage
+    9. Inserts record into database with chat_id if provided
+    10. Returns the public URL
     """
     try:
         # Step 0: Extract authenticated user ID
@@ -92,16 +101,18 @@ async def generate_image(request: Request, body: GenerateRequest):
                 detail="Missing tile source: provide either tile_url or tile_id"
             )
 
-        # Check that we have either home_url or home_id
-        if not body.home_url and not body.home_id:
+        # Check that we have either home_url, home_id, or base_image_url
+        if not body.home_url and not body.home_id and not body.base_image_url:
             raise HTTPException(
                 status_code=400,
-                detail="Missing home source: provide either home_url or home_id"
+                detail="Missing base image source: provide either home_url, home_id, or base_image_url"
             )
 
         # Step 0.6: Fetch URLs from database if IDs provided but URLs missing
         tile_url = body.tile_url
         home_url = body.home_url
+        base_image_url = body.base_image_url
+        is_multi_stage = bool(base_image_url)
 
         if not tile_url and body.tile_id:
             logger.info(f"📥 Fetching tile URL from database for tile_id={body.tile_id}")
@@ -120,7 +131,12 @@ async def generate_image(request: Request, body: GenerateRequest):
             tile_url = tile_res.data[0]["image_url"]
             logger.info(f"✅ Fetched tile URL: {tile_url}")
 
-        if not home_url and body.home_id:
+        # Determine which base image to use: base_image_url takes precedence over home_url/home_id
+        if base_image_url:
+            home_url = base_image_url
+            logger.info(f"✅ Multi-stage generation: Using base_image_url as primary image")
+            logger.info(f"   Base image URL: {base_image_url[:80]}...")
+        elif not home_url and body.home_id:
             logger.info(f"📥 Fetching home URL from database for home_id={body.home_id}")
             home_res = supabase.table("homes")\
                 .select("image_url")\
@@ -304,7 +320,73 @@ Output ONLY a JSON object:
         user_prompt = body.prompt if body.prompt else ""
 
         # Build comprehensive, bulletproof generation prompt
-        generation_prompt = f"""You are an expert visual compositor creating a photorealistic tile visualization.
+        # Use different prompt for multi-stage generation
+        if is_multi_stage:
+            # Multi-stage continuation prompt
+            tile_name = "provided tile image"
+            generation_prompt = f"""You are performing a *continuation* visualization task.
+The base image already contains previous tile renderings on some surfaces.
+
+CRITICAL CONTEXT:
+- The base image you're working with already has tiles applied to certain surfaces
+- Your task is to apply a NEW tile to a DIFFERENT surface
+- DO NOT modify or alter any previously tiled areas
+
+INSTRUCTIONS:
+
+Step 1: PRESERVE EXISTING WORK
+- Keep all existing surfaces, objects, and lighting EXACTLY the same
+- Identify which surfaces already have tiles applied
+- DO NOT modify previously tiled areas under any circumstances
+- Maintain all existing shadows, reflections, and lighting conditions
+
+Step 2: IDENTIFY NEW SURFACE
+- Identify a *new logical surface* (e.g., wall, counter, backsplash, etc.) to apply the new tile
+- Choose a surface that is DIFFERENT from surfaces that already have tiles
+- Common progression: floor → wall → backsplash → countertop
+- Ensure the chosen surface makes architectural sense
+
+Step 3: APPLY NEW TILE
+- Apply the new tile ({tile_name}) only on the specified NEW surface
+- Surface type guidance: {context.get('surface_type', 'auto')}
+- Tile size appears: {context.get('estimated_tile_size', 'medium')}
+- Keep tile color and texture IDENTICAL to the new tile image provided
+- Maintain correct perspective and alignment with the room geometry
+
+Step 4: MAINTAIN REALISM
+- Preserve reflections and shadows from the base image
+- Adjust perspective naturally for the new surface
+- Match color tones between old and new surfaces
+- Avoid any blending artifacts or duplicate tiles
+- Ensure seamless integration with existing tiled surfaces
+- Maintain consistent lighting across all surfaces
+
+Step 5: QUALITY REQUIREMENTS
+- Output must look like a single, cohesive architectural photograph
+- No visible seams between old and new tile applications
+- Both old and new tiles should be clearly visible in the final output
+- Preserve the exact appearance of previously applied tiles
+- Same lighting and color grading throughout the image
+
+CRITICAL RULES:
+❌ Do NOT modify previously tiled areas
+❌ Do NOT change existing lighting or shadows
+❌ Do NOT add tiles to surfaces that already have tiles
+❌ Do NOT alter wall colors or existing textures
+❌ Do NOT create duplicate or overlapping tile patterns
+
+✅ DO keep existing tile work exactly as is
+✅ DO apply new tile to a different, logical surface
+✅ DO maintain physical realism and perspective
+✅ DO ensure both old and new tiles are visible"""
+
+            if user_prompt and user_prompt.strip():
+                generation_prompt += f"\n\n🎯 USER REQUEST (highest priority): '{user_prompt.strip()}'"
+
+            logger.info(f"✅ Multi-stage generation: Used base_image_url + new tile")
+        else:
+            # Standard first-generation prompt
+            generation_prompt = f"""You are an expert visual compositor creating a photorealistic tile visualization.
 
 TASK:
 You have two images:
@@ -350,8 +432,8 @@ CRITICAL RULES:
 ✅ DO apply tiles only where they logically belong
 ✅ DO ensure color fidelity to original tile image"""
 
-        if user_prompt and user_prompt.strip():
-            generation_prompt += f"\n\n🎯 USER REQUEST (highest priority): {user_prompt.strip()}"
+            if user_prompt and user_prompt.strip():
+                generation_prompt += f"\n\n🎯 USER REQUEST (highest priority): {user_prompt.strip()}"
 
         logger.info(f"🎨 Using generation prompt (length: {len(generation_prompt)} chars)")
 
